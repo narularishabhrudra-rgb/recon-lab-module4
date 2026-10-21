@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:">
+<title>Log Analyzer | Cybersecurity Capstone</title>
+<style>
+:root{--bg:#f6f7fb;--card:#fff;--tx:#14171f;--mut:#5b6475;--bd:#e2e5ee;--ac:#8b1a3d}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1218;--card:#181c25;--tx:#e8eaf0;--mut:#9aa3b5;--bd:#2a303d;--ac:#e0698c}}
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+main{max-width:900px;margin:0 auto;padding:16px}h1{margin:.2em 0}h2{margin:1.4em 0 .4em;font-size:1.1em}
+.mut{color:var(--mut)}textarea{width:100%;height:150px;font:12px monospace;background:var(--card);color:var(--tx);border:1px solid var(--bd);border-radius:8px;padding:8px}
+button,label.b{display:inline-block;background:var(--ac);color:#fff;border:0;border-radius:8px;padding:9px 14px;margin:6px 6px 0 0;font:inherit;cursor:pointer}
+button.o,label.b{background:transparent;color:var(--ac);border:1px solid var(--ac)}input[type=file]{display:none}
+input[type=number]{width:64px;padding:6px;border-radius:6px;border:1px solid var(--bd);background:var(--card);color:var(--tx)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:10px}.card b{display:block;font-size:1.6em}.card span{color:var(--mut)}
+.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;background:var(--card)}th,td{border:1px solid var(--bd);padding:6px 8px;text-align:left;vertical-align:top}
+.sev{padding:2px 8px;border-radius:99px;color:#fff;font-size:12px;white-space:nowrap}.Critical{background:#6a0dad}.High{background:#c62828}.Medium{background:#c77700}.Low{background:#2e7d32}
+.row{display:grid;grid-template-columns:110px 1fr 40px;gap:8px;align-items:center;margin:4px 0}.track{background:var(--bd);border-radius:6px;height:12px}.track i{display:block;height:100%;background:var(--ac);border-radius:6px}.row em{font-style:normal;text-align:right}
+</style></head><body><main>
+<h1>Log Analyzer</h1>
+<p class="mut">Paste or upload an SSH auth log or a web access log (Apache/Nginx combined format). Analysis runs entirely in your browser. Nothing is uploaded anywhere.</p>
+<textarea id="txt" placeholder="Paste log lines here..." aria-label="Log input"></textarea>
+<div>
+<label class="b" for="file">Upload log</label><input type="file" id="file" accept=".log,.txt,text/plain">
+<button id="go">Analyze</button><button id="demo" class="o">Load sample data</button>
+<span class="mut"> Brute-force threshold: </span><input type="number" id="thr" value="5" min="1">
+</div>
+<p class="mut" style="font-size:12px">Use only logs from systems you own or are authorized to analyze. Sample data uses reserved documentation IP ranges.</p>
+<div id="out"></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+function h(tag,txt,cls){const e=document.createElement(tag);if(txt!=null)e.textContent=txt;if(cls)e.className=cls;return e}
+const ACC=/^(\S+) \S+ \S+ \[([^\]]+)\] "(\S+) (\S+)[^"]*" (\d{3}) (\S+)/;
+const FAIL=/Failed password for (?:invalid user )?(\S+) from (\S+)/;
+const OK=/Accepted (?:password|publickey) for (\S+) from (\S+)/;
+const SIGS=[["SQL injection attempt",/(union(\s|%20|\+)+select|\bor\b(\s|%20|\+)+1=1|sleep\(|'--)/i],
+["Cross-site scripting attempt",/(<script|%3cscript|onerror=)/i],
+["Path traversal attempt",/(\.\.\/|%2e%2e)/i],
+["Sensitive file / admin probe",/(\.env|\.git\/|phpmyadmin|wp-login\.php|etc\/passwd)/i]];
+function analyze(text,thr){
+ const lines=text.split(/\r?\n/).filter(l=>l.trim());
+ const ips={},fails={},users={},oks={},err4={},status={},hits={};let parsed=0;
+ const inc=(o,k)=>o[k]=(o[k]||0)+1;
+ for(const l of lines){let m;
+  if(m=FAIL.exec(l)){parsed++;inc(ips,m[2]);inc(fails,m[2]);(users[m[2]]=users[m[2]]||new Set()).add(m[1]);continue}
+  if(m=OK.exec(l)){parsed++;inc(ips,m[2]);oks[m[2]]=m[1];continue}
+  if(m=ACC.exec(l)){parsed++;const ip=m[1],code=m[5],p=m[4];inc(ips,ip);inc(status,code);if(code[0]==='4')inc(err4,ip);
+   let d=p;try{d=decodeURIComponent(p)}catch(e){}
+   for(const[n,re]of SIGS){if(re.test(p)||re.test(d)){const k=n+'|'+ip;(hits[k]=hits[k]||{type:n,ip,count:0,sample:p}).count++}}}}
+ const F=[];
+ for(const ip in fails)if(fails[ip]>=thr){
+  F.push({sev:'High',title:'Brute-force login attempts',ip,detail:fails[ip]+' failed logins across '+users[ip].size+' account(s)'});
+  if(oks[ip])F.push({sev:'Critical',title:'Successful login after repeated failures',ip,detail:'Account "'+oks[ip]+'" logged in after '+fails[ip]+' failures. Possible compromise.'})}
+ for(const ip in err4)if(err4[ip]>=10)F.push({sev:'Medium',title:'Possible scanning (many 4xx errors)',ip,detail:err4[ip]+' client-error responses'});
+ for(const k in hits){const x=hits[k];F.push({sev:/probe/.test(x.type)?'Medium':'High',title:x.type,ip:x.ip,detail:x.count+' request(s), e.g. '+x.sample.slice(0,80)})}
+ const o={Critical:0,High:1,Medium:2,Low:3};F.sort((a,b)=>o[a.sev]-o[b.sev]);
+ return{total:lines.length,parsed,ips,status,findings:F}}
+function bars(out,title,ent){if(!ent.length)return;out.append(h('h2',title));const max=Math.max(...ent.map(e=>e[1]));
+ ent.forEach(([k,v])=>{const row=h('div',null,'row'),tr=h('div',null,'track'),bar=h('i');bar.style.width=Math.max(4,v/max*100)+'%';tr.append(bar);row.append(h('span',k),tr,h('em',String(v)));out.append(row)})}
+function render(r){const out=$('out');out.replaceChildren();
+ const cards=h('div',null,'cards');
+ [['Lines',r.total],['Parsed',r.parsed],['Unique IPs',Object.keys(r.ips).length],['Findings',r.findings.length]].forEach(([k,v])=>{const c=h('div',null,'card');c.append(h('b',String(v)),h('span',k));cards.append(c)});
+ out.append(cards,h('h2','Findings'));
+ if(!r.findings.length)out.append(h('p','No suspicious activity detected with current rules.','mut'));
+ else{const t=h('table'),hd=h('tr');['Severity','Finding','Source IP','Details'].forEach(x=>hd.append(h('th',x)));t.append(hd);
+  r.findings.forEach(f=>{const tr=h('tr'),s=h('td');s.append(h('span',f.sev,'sev '+f.sev));tr.append(s,h('td',f.title),h('td',f.ip),h('td',f.detail));t.append(tr)});
+  const w=h('div',null,'scroll');w.append(t);out.append(w)}
+ bars(out,'Top source IPs',Object.entries(r.ips).sort((a,b)=>b[1]-a[1]).slice(0,8));
+ bars(out,'HTTP status codes',Object.entries(r.status).sort());
+ const btn=h('button','Download report (JSON)');btn.onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(r,null,2)],{type:'application/json'}));a.download='log-analysis-report.json';a.click()};out.append(btn)}
+function sample(){const L=[],a='203.0.113.7',b='198.51.100.23',c='192.0.2.45';
+ for(let i=0;i<12;i++)L.push(`Oct 22 01:${10+i}:05 srv sshd[2201]: Failed password for ${i%2?'root':'admin'} from ${a} port 40${i}22 ssh2`);
+ L.push(`Oct 22 01:25:11 srv sshd[2210]: Accepted password for admin from ${a} port 51122 ssh2`);
+ const w=(ip,path,code)=>L.push(`${ip} - - [22/Oct/2026:01:30:00 +0000] "GET ${path} HTTP/1.1" ${code} 512`);
+ ["/","/about","/contact","/index.html"].forEach(p=>w(c,p,200));
+ w(b,"/search?q=1'%20OR%201=1--",500);w(b,"/page?id=1%20UNION%20SELECT%20password%20FROM%20users",500);
+ w(b,"/view?file=../../etc/passwd",403);w(b,"/comment?x=<script>alert(1)<\/script>",400);w(b,"/.env",404);w(b,"/phpmyadmin/",404);
+ for(let i=0;i<10;i++)w(b,"/admin"+i,404);
+ return L.join("\n")}
+function init(){const run=t=>render(analyze(t,Math.max(1,+$('thr').value||5)));
+ $('file').onchange=e=>{const f=e.target.files[0];if(f)f.text().then(t=>{$('txt').value=t.slice(0,5e6);run($('txt').value)})};
+ $('go').onclick=()=>run($('txt').value);
+ $('demo').onclick=()=>{$('txt').value=sample();run($('txt').value)}}
+if(typeof document!=='undefined'&&document.getElementById('go'))init();
+</script></body></html>
